@@ -105,6 +105,11 @@ def version_lt(v1, v2):
     return out
 
 
+def _is_fresh(path, seconds):
+    """Return True if path exists and was modified within the last `seconds`."""
+    return os.path.exists(path) and (time.time() - os.path.getmtime(path) < seconds)
+
+
 def max_version(versions):
     """Return the highest version string (dpkg ordering) from an iterable."""
     best = None
@@ -171,9 +176,15 @@ def _save_nvd_cache(cache):
 
 
 def _fetch_nvd(cve_id, cache):
-    """Return {severity, published} for a CVE (or None), using/updating cache."""
+    """Return {severity, published} for a CVE (or None), using/updating cache.
+
+    Only real CVE IDs are looked up. Failed / not-yet-in-NVD lookups are NOT
+    cached, so they get retried on the next run (NVD has a processing backlog).
+    """
     if cve_id in cache:
         return cache[cve_id]
+    if not re.match(r"^CVE-\d{4}-\d+$", cve_id):
+        return None
     headers = {"User-Agent": "Mozilla/5.0"}
     if NVD_API_KEY:
         headers["apiKey"] = NVD_API_KEY
@@ -183,12 +194,10 @@ def _fetch_nvd(cve_id, cache):
         with urllib.request.urlopen(req, timeout=30) as r:
             data = json.loads(r.read().decode())
     except Exception:
-        cache[cve_id] = None
         return None
 
     vulns = data.get("vulnerabilities", [])
     if not vulns:
-        cache[cve_id] = None
         return None
 
     cve = vulns[0].get("cve", {})
@@ -207,9 +216,9 @@ def _fetch_nvd(cve_id, cache):
     return result
 
 
-def enrich_nvd(findings):
+def enrich_nvd(findings, no_cache=False):
     """Add NVD severity + published date to each finding's CVEs (cached, throttled)."""
-    cache = _load_nvd_cache()
+    cache = {} if no_cache else _load_nvd_cache()
 
     # cve_id -> list of CVE entries across all findings
     cve_map = {}
@@ -217,7 +226,7 @@ def enrich_nvd(findings):
         for c in f["cves"]:
             cve_map.setdefault(c["id"], []).append(c)
 
-    pending = list(cve_map.keys())
+    pending = [c for c in cve_map.keys() if re.match(r"^CVE-\d{4}-\d+$", c)]
     print(f"Enriching {len(pending)} unique CVEs from NVD ...", file=sys.stderr)
     for i, cve_id in enumerate(pending, 1):
         nvd = _fetch_nvd(cve_id, cache)
@@ -317,8 +326,8 @@ def build_package_index(repo_url):
 # ── tracker data ──────────────────────────────────────────────────────────────
 
 def load_tracker(no_cache=False):
-    """Download (and cache) the security-tracker JSON export."""
-    if not no_cache and os.path.exists(TRACKER_CACHE):
+    """Download (and cache) the security-tracker JSON export (24h TTL)."""
+    if not no_cache and _is_fresh(TRACKER_CACHE, 86400):
         print(f"Using cached tracker data: {TRACKER_CACHE}", file=sys.stderr)
         with open(TRACKER_CACHE) as f:
             return json.load(f)
@@ -336,8 +345,7 @@ def load_tracker(no_cache=False):
 
 def _ensure_dsa_list(no_cache=False):
     """Ensure data/DSA/list exists via a shallow sparse clone (refreshed daily)."""
-    fresh = os.path.exists(DSA_LIST_PATH) and (time.time() - os.path.getmtime(DSA_LIST_PATH) < 86400)
-    if not no_cache and fresh:
+    if not no_cache and _is_fresh(DSA_LIST_PATH, 86400):
         return DSA_LIST_PATH
 
     print("Fetching DSA list (shallow sparse clone) ...", file=sys.stderr)
@@ -386,9 +394,7 @@ def load_dsa_map(no_cache=False):
 
 def load_dsa_announce(no_cache=False):
     """Fetch the DSA -> announcement URL mapping from debian.org/security."""
-    fresh = os.path.exists(DSA_ANNOUNCE_CACHE) and \
-        (time.time() - os.path.getmtime(DSA_ANNOUNCE_CACHE) < 86400)
-    if not no_cache and fresh:
+    if not no_cache and _is_fresh(DSA_ANNOUNCE_CACHE, 86400):
         with open(DSA_ANNOUNCE_CACHE) as f:
             return json.load(f)
     try:
@@ -785,25 +791,27 @@ FILTER_SCRIPT = """<script>
 (function () {
   var input = document.getElementById('filter-pkg');
   var sel = document.getElementById('filter-sev');
-  var dsaInput = document.getElementById('filter-dsa');
+  var dsaSel = document.getElementById('filter-dsa');
   if (!input || !sel) return;
   function apply() {
     var q = input.value.toLowerCase().trim();
     var sev = sel.value;
-    var dsa = dsaInput ? dsaInput.value.toLowerCase().trim() : '';
+    var dsaV = dsaSel ? dsaSel.value : '';
     document.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
       var pkg = tr.getAttribute('data-pkg') || '';
       var s = tr.getAttribute('data-sev') || '';
       var d = tr.getAttribute('data-dsa') || '';
       var okP = !q || pkg.indexOf(q) !== -1;
       var okS = !sev || s === sev;
-      var okD = !dsa || d.toLowerCase().indexOf(dsa) !== -1;
+      var okD = true;
+      if (dsaV === 'has') okD = d.trim() !== '';
+      else if (dsaV === 'none') okD = d.trim() === '';
       tr.style.display = (okP && okS && okD) ? '' : 'none';
     });
   }
   input.addEventListener('input', apply);
   sel.addEventListener('change', apply);
-  if (dsaInput) dsaInput.addEventListener('input', apply);
+  if (dsaSel) dsaSel.addEventListener('change', apply);
 })();
 </script>
 """
@@ -816,7 +824,6 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
         return _html.escape(str(s))
 
     show_dsa = dsa_map is not None
-    dsa_th = '<th>DSA</th>' if show_dsa else ''
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     rows = []
@@ -848,19 +855,19 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
                 dsa_ids.append(d)
         dsa_attr = " ".join(dsa_ids)
 
-        if show_dsa:
-            if dsa_ids:
-                parts = []
-                for d in dsa_ids:
-                    ann = (dsa_announce or {}).get(d)
-                    label = f'<a href="{e(ann)}" target="_blank">{e(d)}</a>' if ann else e(d)
-                    tracker = f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">Tracker</a>'
-                    parts.append(f'{label} | {tracker}')
-                dsa_cell = f'<td class="cve-list">{"<br>".join(parts)}</td>'
-            else:
-                dsa_cell = '<td class="cve-list">—</td>'
-        else:
-            dsa_cell = ""
+        # Advisory cell: DSA lines (if any) above the CVE list.
+        adv_parts = []
+        if show_dsa and dsa_ids:
+            for d in dsa_ids:
+                ann = (dsa_announce or {}).get(d)
+                label = f'<a href="{e(ann)}" target="_blank">{e(d)}</a>' if ann else e(d)
+                tracker = f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">Tracker</a>'
+                adv_parts.append(f'{label} | {tracker}')
+        adv_parts.append(f'{len(f["cves"])} CVE: {cve_links}')
+        advisory_cell = f'<td class="cve-list">{"<br>".join(adv_parts)}</td>'
+
+        # Details cell: fixed-in-stable-releases table + description.
+        details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
 
         rows.append(f"""
         <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
@@ -868,10 +875,8 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
           {sev_cell}
           <td class="ver-our">{e(f['our_version'])}</td>
           <td class="ver-fix">{e(f['fixed_version'])}</td>
-          <td>{rel_table}</td>
-          {dsa_cell}
-          <td class="cve-list">{len(f['cves'])} — {cve_links}</td>
-          <td class="cve-list">{e(desc)}</td>
+          {advisory_cell}
+          {details_cell}
         </tr>""")
 
     count = len(findings)
@@ -895,7 +900,12 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
 
     filters_html = ""
     if count:
-        dsa_filter = '<input type="text" id="filter-dsa" placeholder="Filter by DSA…">' if show_dsa else ''
+        dsa_filter = '''
+    <select id="filter-dsa">
+      <option value="">All DSA</option>
+      <option value="has">Has DSA</option>
+      <option value="none">No DSA</option>
+    </select>''' if show_dsa else ''
         filters_html = f'''
   <div class="filters">
     <input type="text" id="filter-pkg" placeholder="Filter by package…">
@@ -935,7 +945,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
   {"" if not count else f'''
   <table>
     <thead>
-      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Fixed in stable releases</th>{dsa_th}<th>CVEs</th><th>Description</th></tr>
+      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
     </thead>
     <tbody>{''.join(rows)}</tbody>
   </table>'''}
@@ -999,7 +1009,7 @@ def main():
     findings = evaluate(package_index, tracker)
 
     if not no_nvd:
-        enrich_nvd(findings)
+        enrich_nvd(findings, no_cache=no_cache)
 
     if min_severity:
         min_rank = SEVERITY_RANK.get(min_severity)
