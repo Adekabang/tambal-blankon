@@ -65,6 +65,10 @@ SEC_TRACKER_REPO = "https://salsa.debian.org/security-tracker-team/security-trac
 SEC_TRACKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sec-tracker")
 DSA_LIST_PATH = os.path.join(SEC_TRACKER_DIR, "data", "DSA", "list")
 
+# debian.org/security page lists each DSA with its mailing-list announcement URL.
+DSA_ANNOUNCE_URL = "https://www.debian.org/security/"
+DSA_ANNOUNCE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dsa-announce.json")
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -378,6 +382,30 @@ def load_dsa_map(no_cache=False):
         dsa_map = parse_dsa_list(f.read())
     print(f"Loaded {len(dsa_map)} CVE->DSA mappings.", file=sys.stderr)
     return dsa_map
+
+
+def load_dsa_announce(no_cache=False):
+    """Fetch the DSA -> announcement URL mapping from debian.org/security."""
+    fresh = os.path.exists(DSA_ANNOUNCE_CACHE) and \
+        (time.time() - os.path.getmtime(DSA_ANNOUNCE_CACHE) < 86400)
+    if not no_cache and fresh:
+        with open(DSA_ANNOUNCE_CACHE) as f:
+            return json.load(f)
+    try:
+        html = fetch_text(DSA_ANNOUNCE_URL)
+    except Exception:
+        print("Warning: could not fetch debian.org/security.", file=sys.stderr)
+        return {}
+    announce = {}
+    for m in re.finditer(
+        r'href="(https://lists\.debian\.org/debian-security-announce/[^"]+)"[^>]*>\s*(DSA-\d+-\d+)',
+        html,
+    ):
+        announce[m.group(2)] = m.group(1)
+    with open(DSA_ANNOUNCE_CACHE, "w") as f:
+        json.dump(announce, f)
+    print(f"Loaded {len(announce)} DSA announcement URLs.", file=sys.stderr)
+    return announce
 
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
@@ -757,29 +785,38 @@ FILTER_SCRIPT = """<script>
 (function () {
   var input = document.getElementById('filter-pkg');
   var sel = document.getElementById('filter-sev');
+  var dsaInput = document.getElementById('filter-dsa');
   if (!input || !sel) return;
   function apply() {
     var q = input.value.toLowerCase().trim();
     var sev = sel.value;
+    var dsa = dsaInput ? dsaInput.value.toLowerCase().trim() : '';
     document.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
       var pkg = tr.getAttribute('data-pkg') || '';
       var s = tr.getAttribute('data-sev') || '';
-      tr.style.display = ((!q || pkg.indexOf(q) !== -1) && (!sev || s === sev)) ? '' : 'none';
+      var d = tr.getAttribute('data-dsa') || '';
+      var okP = !q || pkg.indexOf(q) !== -1;
+      var okS = !sev || s === sev;
+      var okD = !dsa || d.toLowerCase().indexOf(dsa) !== -1;
+      tr.style.display = (okP && okS && okD) ? '' : 'none';
     });
   }
   input.addEventListener('input', apply);
   sel.addEventListener('change', apply);
+  if (dsaInput) dsaInput.addEventListener('input', apply);
 })();
 </script>
 """
 
 
-def write_html_report(findings, html_dir, repo_url, dsa_map=None):
+def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=None):
     import html as _html
 
     def e(s):
         return _html.escape(str(s))
 
+    show_dsa = dsa_map is not None
+    dsa_th = '<th>DSA</th>' if show_dsa else ''
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     rows = []
@@ -809,17 +846,24 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None):
             d = (dsa_map or {}).get(c["id"])
             if d and d not in dsa_ids:
                 dsa_ids.append(d)
-        if dsa_ids:
-            dsa_links = ", ".join(
-                f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">{e(d)}</a>'
-                for d in dsa_ids
-            )
-            dsa_cell = f'<td class="cve-list">{dsa_links}</td>'
+        dsa_attr = " ".join(dsa_ids)
+
+        if show_dsa:
+            if dsa_ids:
+                parts = []
+                for d in dsa_ids:
+                    ann = (dsa_announce or {}).get(d)
+                    label = f'<a href="{e(ann)}" target="_blank">{e(d)}</a>' if ann else e(d)
+                    tracker = f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">Tracker</a>'
+                    parts.append(f'{label} | {tracker}')
+                dsa_cell = f'<td class="cve-list">{"<br>".join(parts)}</td>'
+            else:
+                dsa_cell = '<td class="cve-list">—</td>'
         else:
-            dsa_cell = '<td class="cve-list">—</td>'
+            dsa_cell = ""
 
         rows.append(f"""
-        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}">
+        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
           <td>{e(f['package'])}</td>
           {sev_cell}
           <td class="ver-our">{e(f['our_version'])}</td>
@@ -851,6 +895,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None):
 
     filters_html = ""
     if count:
+        dsa_filter = '<input type="text" id="filter-dsa" placeholder="Filter by DSA…">' if show_dsa else ''
         filters_html = f'''
   <div class="filters">
     <input type="text" id="filter-pkg" placeholder="Filter by package…">
@@ -862,6 +907,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None):
       <option value="low">Low</option>
       <option value="unknown">Unknown</option>
     </select>
+    {dsa_filter}
   </div>'''
 
     page = f"""<!DOCTYPE html>
@@ -889,7 +935,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None):
   {"" if not count else f'''
   <table>
     <thead>
-      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Fixed in stable releases</th><th>DSA</th><th>CVEs</th><th>Description</th></tr>
+      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Fixed in stable releases</th>{dsa_th}<th>CVEs</th><th>Description</th></tr>
     </thead>
     <tbody>{''.join(rows)}</tbody>
   </table>'''}
@@ -917,6 +963,7 @@ def main():
     html_dir = None
     no_cache = False
     no_nvd = False
+    no_dsa = False
     min_severity = None
 
     for arg in sys.argv[1:]:
@@ -930,6 +977,8 @@ def main():
             no_cache = True
         elif arg == "--no-nvd":
             no_nvd = True
+        elif arg == "--no-dsa":
+            no_dsa = True
         elif arg.startswith("--min-severity="):
             min_severity = arg.split("=", 1)[1].lower()
 
@@ -939,7 +988,12 @@ def main():
 
     tracker = load_tracker(no_cache=no_cache)
     package_index = build_package_index(repo_url)
-    dsa_map = load_dsa_map(no_cache=no_cache)
+    if no_dsa:
+        dsa_map = None
+        dsa_announce = None
+    else:
+        dsa_map = load_dsa_map(no_cache=no_cache)
+        dsa_announce = load_dsa_announce(no_cache=no_cache)
 
     print("Evaluating packages ...", file=sys.stderr)
     findings = evaluate(package_index, tracker)
@@ -965,7 +1019,7 @@ def main():
     if not findings:
         print("No vulnerable packages found.", file=sys.stderr)
         if html_dir:
-            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map)
+            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce)
         sys.exit(0)
 
     print(f"Found {len(findings)} package(s) behind Debian security fixes:\n", file=sys.stderr)
@@ -973,7 +1027,7 @@ def main():
         print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map)
+        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce)
 
 
 if __name__ == "__main__":

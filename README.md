@@ -21,6 +21,7 @@ python3 tambal.py --repo=http://arsip-dev.blankonlinux.id/sinambung/ --output=./
 - `--html=` — write the HTML report to this directory (optional).
 - `--no-cache` — re-download the Debian security-tracker data instead of using the cached `tracker.json`.
 - `--no-nvd` — skip NVD severity enrichment (faster; severity comes from Debian data only).
+- `--no-dsa` — skip the DSA list fetch and hide the DSA column.
 - `--min-severity=high` — only show packages at or above this severity (`critical`/`high`/`medium`/`low`).
 
 ## NVD severity
