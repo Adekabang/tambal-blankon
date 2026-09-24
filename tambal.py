@@ -465,6 +465,18 @@ PAGE_STYLE = """
     .sev-high { color: #e67e22; font-weight: bold; }
     .sev-medium { color: #b8860b; }
     .sev-low { color: var(--muted); }
+    .filters { display: flex; gap: 0.6rem; align-items: center; margin: 0.75rem 0 1rem; flex-wrap: wrap; }
+    .filters input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; min-width: 220px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 0.375rem; }
+    .filters select { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--border);
+      background: var(--bg); color: var(--fg); border-radius: 0.375rem; }
+    .sev-badge { display: inline-block; padding: 0.12rem 0.55rem; border-radius: 999px;
+      font-size: 0.8rem; margin: 0 0.3rem 0.3rem 0; border: 1px solid var(--border); white-space: nowrap; }
+    .sev-badge.critical { color: var(--bad); border-color: var(--bad); }
+    .sev-badge.high { color: #e67e22; border-color: #e67e22; }
+    .sev-badge.medium { color: #b8860b; border-color: #b8860b; }
+    .sev-badge.low { color: var(--muted); }
+    .sev-badge.unknown { color: var(--muted); }
     .cve-list { font-size: 0.82em; color: var(--muted); }
     table.inner { font-size: 0.82rem; border: none; width: auto; }
     table.inner th, table.inner td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; }
@@ -494,6 +506,26 @@ NAV_HTML = """
 </header>
 """
 
+FILTER_SCRIPT = """<script>
+(function () {
+  var input = document.getElementById('filter-pkg');
+  var sel = document.getElementById('filter-sev');
+  if (!input || !sel) return;
+  function apply() {
+    var q = input.value.toLowerCase().trim();
+    var sev = sel.value;
+    document.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
+      var pkg = tr.getAttribute('data-pkg') || '';
+      var s = tr.getAttribute('data-sev') || '';
+      tr.style.display = ((!q || pkg.indexOf(q) !== -1) && (!sev || s === sev)) ? '' : 'none';
+    });
+  }
+  input.addEventListener('input', apply);
+  sel.addEventListener('change', apply);
+})();
+</script>
+"""
+
 
 def write_html_report(findings, html_dir, repo_url):
     import html as _html
@@ -521,11 +553,12 @@ def write_html_report(findings, html_dir, repo_url):
         )
 
         sev = f.get("severity")
-        sev_cls = f"sev-{sev.lower()}" if sev else ""
+        sev_key = sev.lower() if sev else "unknown"
+        sev_cls = f"sev-{sev_key}" if sev else ""
         sev_cell = f'<td class="{sev_cls}">{e(sev) if sev else "—"}</td>'
 
         rows.append(f"""
-        <tr>
+        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}">
           <td>{e(f['package'])}</td>
           {sev_cell}
           <td class="ver-our">{e(f['our_version'])}</td>
@@ -537,6 +570,37 @@ def write_html_report(findings, html_dir, repo_url):
 
     count = len(findings)
     summary = f"{count} package(s) behind Debian security fixes." if count else "All packages up to date."
+
+    # Severity summary badges.
+    sev_counts = {}
+    for f in findings:
+        key = (f.get("severity") or "unknown").lower()
+        sev_counts[key] = sev_counts.get(key, 0) + 1
+    badges = "".join(
+        f'<span class="sev-badge {k}">{k.capitalize()}: {n}</span>'
+        for k, n in (("critical", sev_counts.get("critical", 0)),
+                     ("high", sev_counts.get("high", 0)),
+                     ("medium", sev_counts.get("medium", 0)),
+                     ("low", sev_counts.get("low", 0)),
+                     ("unknown", sev_counts.get("unknown", 0)))
+        if n
+    )
+    badges_html = f'<div class="filters">{badges}</div>' if badges else ""
+
+    filters_html = ""
+    if count:
+        filters_html = f'''
+  <div class="filters">
+    <input type="text" id="filter-pkg" placeholder="Filter by package…">
+    <select id="filter-sev">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option>
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+      <option value="unknown">Unknown</option>
+    </select>
+  </div>'''
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -558,6 +622,8 @@ def write_html_report(findings, html_dir, repo_url):
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
   <div class="summary {"bad" if count else "ok"}">{e(summary)}</div>
+  {badges_html}
+  {filters_html}
   {"" if not count else f'''
   <table>
     <thead>
@@ -569,6 +635,7 @@ def write_html_report(findings, html_dir, repo_url):
     Source code: <a href="{e(SOURCE_URL)}" target="_blank">{e(SOURCE_URL)}</a>
   </footer>
 </main>
+{FILTER_SCRIPT}
 </body>
 </html>
 """
