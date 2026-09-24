@@ -902,7 +902,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
     if count:
         dsa_filter = '''
     <select id="filter-dsa">
-      <option value="">All DSA</option>
+      <option value="">All</option>
       <option value="has">Has DSA</option>
       <option value="none">No DSA</option>
     </select>''' if show_dsa else ''
