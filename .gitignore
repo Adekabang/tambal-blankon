@@ -7,3 +7,4 @@ __pycache__/
 .env
 advisories.json
 security-advisories/
+sec-tracker/

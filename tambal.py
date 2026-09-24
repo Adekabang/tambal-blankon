@@ -23,6 +23,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -58,6 +59,11 @@ _load_env_file()
 # Optional. Set NVD_API_KEY (environment or .env) to raise the rate limit
 # (5 req/30s keyless -> 50 req/30s with a key). Never hardcode it here.
 NVD_API_KEY = os.environ.get("NVD_API_KEY", "")
+
+# Debian security-tracker git repo (source of the DSA list, mapping DSA -> CVEs).
+SEC_TRACKER_REPO = "https://salsa.debian.org/security-tracker-team/security-tracker.git"
+SEC_TRACKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sec-tracker")
+DSA_LIST_PATH = os.path.join(SEC_TRACKER_DIR, "data", "DSA", "list")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -320,6 +326,58 @@ def load_tracker(no_cache=False):
         json.dump(tracker, f)
     print(f"  Cached {len(tracker)} packages to {TRACKER_CACHE}", file=sys.stderr)
     return tracker
+
+
+# ── DSA list ──────────────────────────────────────────────────────────────────
+
+def _ensure_dsa_list(no_cache=False):
+    """Ensure data/DSA/list exists via a shallow sparse clone (refreshed daily)."""
+    fresh = os.path.exists(DSA_LIST_PATH) and (time.time() - os.path.getmtime(DSA_LIST_PATH) < 86400)
+    if not no_cache and fresh:
+        return DSA_LIST_PATH
+
+    print("Fetching DSA list (shallow sparse clone) ...", file=sys.stderr)
+    if os.path.isdir(SEC_TRACKER_DIR):
+        shutil.rmtree(SEC_TRACKER_DIR)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
+         SEC_TRACKER_REPO, SEC_TRACKER_DIR],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", SEC_TRACKER_DIR, "sparse-checkout", "set", "data/DSA"],
+        capture_output=True,
+    )
+    return DSA_LIST_PATH if os.path.exists(DSA_LIST_PATH) else None
+
+
+def parse_dsa_list(text):
+    """Parse data/DSA/list into a {CVE: DSA-id} map (newest DSA wins)."""
+    dsa_map = {}
+    current = None
+    for line in text.splitlines():
+        m = re.match(r"\[.*?\]\s+(DSA-\d+-\d+)\s+", line)
+        if m:
+            current = m.group(1)
+            continue
+        if current:
+            m2 = re.search(r"\{([^}]*)\}", line)
+            if m2:
+                for cve in m2.group(1).split():
+                    if cve.startswith("CVE-"):
+                        dsa_map.setdefault(cve, current)
+    return dsa_map
+
+
+def load_dsa_map(no_cache=False):
+    path = _ensure_dsa_list(no_cache=no_cache)
+    if not path:
+        print("Warning: could not fetch the DSA list.", file=sys.stderr)
+        return {}
+    with open(path) as f:
+        dsa_map = parse_dsa_list(f.read())
+    print(f"Loaded {len(dsa_map)} CVE->DSA mappings.", file=sys.stderr)
+    return dsa_map
 
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
@@ -716,7 +774,7 @@ FILTER_SCRIPT = """<script>
 """
 
 
-def write_html_report(findings, html_dir, repo_url):
+def write_html_report(findings, html_dir, repo_url, dsa_map=None):
     import html as _html
 
     def e(s):
@@ -746,6 +804,20 @@ def write_html_report(findings, html_dir, repo_url):
         sev_cls = f"sev-{sev_key}" if sev else ""
         sev_cell = f'<td class="{sev_cls}">{e(sev) if sev else "—"}</td>'
 
+        dsa_ids = []
+        for c in f["cves"]:
+            d = (dsa_map or {}).get(c["id"])
+            if d and d not in dsa_ids:
+                dsa_ids.append(d)
+        if dsa_ids:
+            dsa_links = ", ".join(
+                f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">{e(d)}</a>'
+                for d in dsa_ids
+            )
+            dsa_cell = f'<td class="cve-list">{dsa_links}</td>'
+        else:
+            dsa_cell = '<td class="cve-list">—</td>'
+
         rows.append(f"""
         <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}">
           <td>{e(f['package'])}</td>
@@ -753,6 +825,7 @@ def write_html_report(findings, html_dir, repo_url):
           <td class="ver-our">{e(f['our_version'])}</td>
           <td class="ver-fix">{e(f['fixed_version'])}</td>
           <td>{rel_table}</td>
+          {dsa_cell}
           <td class="cve-list">{len(f['cves'])} — {cve_links}</td>
           <td class="cve-list">{e(desc)}</td>
         </tr>""")
@@ -816,7 +889,7 @@ def write_html_report(findings, html_dir, repo_url):
   {"" if not count else f'''
   <table>
     <thead>
-      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Fixed in stable releases</th><th>CVEs</th><th>Description</th></tr>
+      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Fixed in stable releases</th><th>DSA</th><th>CVEs</th><th>Description</th></tr>
     </thead>
     <tbody>{''.join(rows)}</tbody>
   </table>'''}
@@ -866,6 +939,7 @@ def main():
 
     tracker = load_tracker(no_cache=no_cache)
     package_index = build_package_index(repo_url)
+    dsa_map = load_dsa_map(no_cache=no_cache)
 
     print("Evaluating packages ...", file=sys.stderr)
     findings = evaluate(package_index, tracker)
@@ -891,7 +965,7 @@ def main():
     if not findings:
         print("No vulnerable packages found.", file=sys.stderr)
         if html_dir:
-            write_html_report(findings, html_dir, repo_url)
+            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map)
         sys.exit(0)
 
     print(f"Found {len(findings)} package(s) behind Debian security fixes:\n", file=sys.stderr)
@@ -899,7 +973,7 @@ def main():
         print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url)
+        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map)
 
 
 if __name__ == "__main__":
