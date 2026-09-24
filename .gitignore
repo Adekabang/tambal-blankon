@@ -5,3 +5,5 @@ nvd-cache.json
 __pycache__/
 *.pyc
 .env
+advisories.json
+security-advisories/
