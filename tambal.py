@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from datetime import datetime
 
@@ -33,6 +34,12 @@ TRACKER_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracke
 SOURCE_URL = "https://github.com/blankon/tambal"
 TRACKER_URL = "https://security-tracker.debian.org/tracker/"
 DSA_URL = "https://www.debian.org/security/#DSAS"
+
+NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NVD_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvd-cache.json")
+# Optional. Set NVD_API_KEY in the environment to raise the rate limit
+# (5 req/30s keyless -> 50 req/30s with a key). Never hardcode it here.
+NVD_API_KEY = os.environ.get("NVD_API_KEY", "")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -112,6 +119,94 @@ def max_severity(sevs):
         if r and (best is None or r > SEVERITY_RANK[best.lower()]):
             best = s
     return best
+
+
+# ── NVD enrichment ────────────────────────────────────────────────────────────
+
+def _nvd_delay():
+    # Respect the rolling rate limit: 5 req/30s keyless, 50 req/30s with a key.
+    # Sleep a little past the per-request average to stay safely under.
+    return 0.7 if NVD_API_KEY else 7.0
+
+
+def _load_nvd_cache():
+    try:
+        with open(NVD_CACHE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_nvd_cache(cache):
+    with open(NVD_CACHE, "w") as f:
+        json.dump(cache, f)
+
+
+def _fetch_nvd(cve_id, cache):
+    """Return {severity, published} for a CVE (or None), using/updating cache."""
+    if cve_id in cache:
+        return cache[cve_id]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if NVD_API_KEY:
+        headers["apiKey"] = NVD_API_KEY
+    url = f"{NVD_API_URL}?cveId={cve_id}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
+        cache[cve_id] = None
+        return None
+
+    vulns = data.get("vulnerabilities", [])
+    if not vulns:
+        cache[cve_id] = None
+        return None
+
+    cve = vulns[0].get("cve", {})
+    sev = None
+    for mkey in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for entry in cve.get("metrics", {}).get(mkey, []):
+            bs = entry.get("cvssData", {}).get("baseSeverity")
+            if bs:
+                s = bs.upper()
+                if sev is None or SEVERITY_RANK.get(s.lower(), 0) > SEVERITY_RANK.get(sev.lower(), 0):
+                    sev = s
+
+    result = {"severity": sev, "published": cve.get("published")}
+    cache[cve_id] = result
+    time.sleep(_nvd_delay())
+    return result
+
+
+def enrich_nvd(findings):
+    """Add NVD severity + published date to each finding's CVEs (cached, throttled)."""
+    cache = _load_nvd_cache()
+
+    # cve_id -> list of CVE entries across all findings
+    cve_map = {}
+    for f in findings:
+        for c in f["cves"]:
+            cve_map.setdefault(c["id"], []).append(c)
+
+    pending = list(cve_map.keys())
+    print(f"Enriching {len(pending)} unique CVEs from NVD ...", file=sys.stderr)
+    for i, cve_id in enumerate(pending, 1):
+        nvd = _fetch_nvd(cve_id, cache)
+        sev = nvd["severity"] if nvd else None
+        pub = nvd["published"] if nvd else None
+        for c in cve_map[cve_id]:
+            c["nvd_severity"] = sev
+            c["published"] = pub
+        if i % 20 == 0:
+            print(f"  [{i}/{len(pending)}]", file=sys.stderr)
+
+    _save_nvd_cache(cache)
+
+    # Recompute each finding's severity, preferring NVD over the Debian estimate.
+    for f in findings:
+        sevs = [c.get("nvd_severity") or c.get("severity") for c in f["cves"]]
+        f["severity"] = max_severity(sevs)
 
 
 # ── repo discovery ────────────────────────────────────────────────────────────
@@ -473,6 +568,8 @@ def main():
     output = None
     html_dir = None
     no_cache = False
+    no_nvd = False
+    min_severity = None
 
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
@@ -483,6 +580,10 @@ def main():
             html_dir = arg.split("=", 1)[1]
         elif arg == "--no-cache":
             no_cache = True
+        elif arg == "--no-nvd":
+            no_nvd = True
+        elif arg.startswith("--min-severity="):
+            min_severity = arg.split("=", 1)[1].lower()
 
     if not repo_url:
         print("Error: --repo=/url or --repository=/url is required", file=sys.stderr)
@@ -493,6 +594,19 @@ def main():
 
     print("Evaluating packages ...", file=sys.stderr)
     findings = evaluate(package_index, tracker)
+
+    if not no_nvd:
+        enrich_nvd(findings)
+
+    if min_severity:
+        min_rank = SEVERITY_RANK.get(min_severity)
+        if min_rank is None:
+            print(f"Error: invalid --min-severity '{min_severity}' (use critical/high/medium/low)", file=sys.stderr)
+            sys.exit(1)
+        findings = [
+            f for f in findings
+            if f.get("severity") and SEVERITY_RANK.get(f["severity"].lower(), 0) >= min_rank
+        ]
 
     if output:
         with open(output, "w") as f:

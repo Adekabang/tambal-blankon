@@ -1,3 +1,6 @@
 venv
 prev_load.hash
 tracker.json
+nvd-cache.json
+__pycache__/
+*.pyc
