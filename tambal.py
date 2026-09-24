@@ -37,7 +37,25 @@ DSA_URL = "https://www.debian.org/security/#DSAS"
 
 NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 NVD_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvd-cache.json")
-# Optional. Set NVD_API_KEY in the environment to raise the rate limit
+
+
+def _load_env_file():
+    """Load KEY=VALUE pairs from a .env file next to the script, if present."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"\''))
+
+
+_load_env_file()
+
+# Optional. Set NVD_API_KEY (environment or .env) to raise the rate limit
 # (5 req/30s keyless -> 50 req/30s with a key). Never hardcode it here.
 NVD_API_KEY = os.environ.get("NVD_API_KEY", "")
 
