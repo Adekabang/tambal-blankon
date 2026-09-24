@@ -409,34 +409,68 @@ def evaluate(package_index, tracker):
 
 PAGE_STYLE = """
     :root {
-      --bg: #ffffff; --fg: #18181b; --muted: #71717a; --border: #e4e4e7;
-      --subtle: #f4f4f5; --subtle-2: #fafafa; --accent: #f0f4ff;
-      --link: #1a73e8; --ok: #27ae60; --bad: #c0392b;
-      --nav-bg: rgba(245,245,245,0.8); --nav-solid: #f5f5f5;
-      --nav-border: rgba(204,204,204,0.5); --nav-fg: #737373;
-      --nav-fg-hover: #0a0a0a; --nav-hover-bg: rgba(209,209,209,0.5);
+      --bg: #ffffff;
+      --fg: #18181b;
+      --muted: #71717a;
+      --border: #e4e4e7;
+      --subtle: #f4f4f5;
+      --subtle-2: #fafafa;
+      --accent: #f0f4ff;
+      --link: #1a73e8;
+      --ok: #27ae60;
+      --bad: #c0392b;
+      --nav-bg: rgba(245, 245, 245, 0.8);
+      --nav-solid: #f5f5f5;
+      --nav-border: rgba(204, 204, 204, 0.5);
+      --nav-fg: #737373;
+      --nav-fg-hover: #0a0a0a;
+      --nav-hover-bg: rgba(209, 209, 209, 0.5);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #09090b; --fg: #fafafa; --muted: #a1a1aa; --border: #27272a;
-        --subtle: #18181b; --subtle-2: #141417; --accent: #1c2333;
-        --link: #6ea8fe; --ok: #4ade80; --bad: #f87171;
-        --nav-bg: rgba(18,18,18,0.8); --nav-solid: #121212;
-        --nav-border: rgba(102,102,102,0.2); --nav-fg: rgba(179,179,179,0.8);
-        --nav-fg-hover: #ebebeb; --nav-hover-bg: rgba(104,104,104,0.3);
+        --bg: #09090b;
+        --fg: #fafafa;
+        --muted: #a1a1aa;
+        --border: #27272a;
+        --subtle: #18181b;
+        --subtle-2: #141417;
+        --accent: #1c2333;
+        --link: #6ea8fe;
+        --ok: #4ade80;
+        --bad: #f87171;
+        --nav-bg: rgba(18, 18, 18, 0.8);
+        --nav-solid: #121212;
+        --nav-border: rgba(102, 102, 102, 0.2);
+        --nav-fg: rgba(179, 179, 179, 0.8);
+        --nav-fg-hover: #ebebeb;
+        --nav-hover-bg: rgba(104, 104, 104, 0.3);
       }
     }
     * { box-sizing: border-box; }
     html { -webkit-text-size-adjust: 100%; }
-    body { margin: 0; background: var(--bg); color: var(--fg);
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Ubuntu,
-                   'Helvetica Neue', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+                   'Helvetica Neue', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
     a { color: var(--link); }
-    .nav { position: sticky; top: 0; z-index: 50; background: var(--nav-bg);
-      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-      border-bottom: 1px solid var(--nav-border); }
-    .nav-inner { max-width: 1400px; margin: 0 auto; display: flex; align-items: center;
-      gap: 1rem; padding: 0 1rem; height: 56px; }
+
+    /* ── top bar (ported from blankon.id) ─────────────────────────────── */
+    .nav {
+      position: sticky; top: 0; z-index: 50;
+      background: var(--nav-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--nav-border);
+    }
+    .nav-inner {
+      max-width: 1400px; margin: 0 auto;
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0 1rem; height: 56px;
+    }
     .nav-logo { display: inline-flex; align-items: center; }
     .nav-logo img { height: 24px; width: auto; display: block; }
     .nav-logo img.dark-only { display: none; }
@@ -444,11 +478,59 @@ PAGE_STYLE = """
       .nav-logo img.light-only { display: none; }
       .nav-logo img.dark-only { display: block; }
     }
-    .nav-links { display: flex; align-items: center; gap: 0.25rem; margin-right: auto; font-size: 0.875rem; }
-    .nav-links a { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.5rem;
-      border: 0; background: none; font: inherit; color: var(--nav-fg); text-decoration: none;
-      transition: color 0.15s; }
-    .nav-links a:hover { color: var(--nav-fg-hover); }
+    .nav-toggle {
+      display: none; background: none; border: 0; cursor: pointer;
+      color: var(--nav-fg); padding: 0.5rem; margin: 0 -0.5rem 0 auto;
+    }
+    .nav-links {
+      display: flex; align-items: center; gap: 0.25rem;
+      margin-right: auto;
+      font-size: 0.875rem;
+    }
+    .nav-links a, .nav-links button {
+      display: inline-flex; align-items: center; gap: 0.375rem;
+      padding: 0.5rem; border: 0; background: none; cursor: pointer;
+      font: inherit; color: var(--nav-fg); text-decoration: none;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover, .nav-links button:hover { color: var(--nav-fg-hover); }
+    .nav-links .ext { width: 14px; height: 14px; opacity: 0.7; flex-shrink: 0; }
+    .nav-drop { position: relative; }
+    .nav-drop > ul {
+      list-style: none; margin: 0; padding: 0.25rem 0;
+      min-width: 170px;
+      position: absolute; left: 0; top: 100%;
+      background: var(--nav-solid); border: 1px solid var(--nav-border);
+      border-radius: 0.375rem; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+      visibility: hidden; opacity: 0; transition: opacity 0.15s;
+    }
+    .nav-drop.open > ul { visibility: visible; opacity: 1; }
+    .nav-drop a { display: flex; padding: 0.5rem 1rem; width: 100%; }
+    .nav-drop a:hover { background: var(--nav-hover-bg); }
+    .nav-caret { width: 12px; height: 12px; transition: transform 0.15s; }
+    .nav-drop.open .nav-caret { transform: rotate(180deg); }
+
+    @media (max-width: 860px) {
+      .nav-toggle { display: inline-flex; }
+      .nav-links {
+        display: none; position: absolute; left: 0; right: 0; top: 56px;
+        flex-direction: column; align-items: stretch; gap: 0;
+        background: var(--nav-solid); border-bottom: 1px solid var(--nav-border);
+        padding: 0.5rem 1rem 1rem;
+      }
+      .nav-links.open { display: flex; }
+      .nav-links a, .nav-links button { padding: 0.625rem 0; }
+      .nav-drop > ul {
+        position: static; visibility: visible; opacity: 1;
+        border: 0; box-shadow: none; background: none; margin: 0;
+        min-width: 0; display: none;
+      }
+      .nav-drop.open > ul { display: block; }
+      .nav-drop a { padding: 0.625rem 0 0.625rem 1rem; }
+      .nav-drop a:hover { background: none; }
+    }
+
+    /* ── report ───────────────────────────────────────────────────────── */
     main { max-width: 1400px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
     h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
     .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; overflow-wrap: anywhere; }
@@ -459,6 +541,20 @@ PAGE_STYLE = """
     th, td { border: 1px solid var(--border); padding: 0.45rem 0.65rem; vertical-align: top; }
     th { background: var(--subtle); text-align: left; white-space: nowrap; }
     tr:hover > td { background: var(--subtle-2); }
+    table.inner { font-size: 0.82rem; border: none; width: auto; }
+    table.inner th, table.inner td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; }
+    table.inner th { background: var(--subtle-2); }
+    .grp { background: var(--subtle); font-style: italic; font-size: 0.82em; }
+    .cve-head { background: var(--accent); font-weight: bold; font-size: 0.82em; }
+    .cve-list { font-size: 0.85em; color: var(--muted); margin-top: 0.25rem; }
+    .none { color: var(--muted); }
+    .ver-above { color: var(--ok); font-weight: bold; }
+    .ver-below { color: var(--bad); font-weight: bold; }
+    .failures { margin-top: 2.5rem; }
+    .failures h2 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+    .failures .note { color: var(--muted); font-size: 0.88rem; margin: 0 0 0.75rem; }
+    .failures .url { word-break: break-all; }
+    .failures .err { color: var(--bad); }
     .ver-our { color: var(--bad); font-weight: bold; }
     .ver-fix { color: var(--ok); font-weight: bold; }
     .sev-critical { color: var(--bad); font-weight: bold; }
@@ -477,12 +573,35 @@ PAGE_STYLE = """
     .sev-badge.medium { color: #b8860b; border-color: #b8860b; }
     .sev-badge.low { color: var(--muted); }
     .sev-badge.unknown { color: var(--muted); }
-    .cve-list { font-size: 0.82em; color: var(--muted); }
-    table.inner { font-size: 0.82rem; border: none; width: auto; }
-    table.inner th, table.inner td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; }
-    table.inner th { background: var(--subtle-2); }
-    footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border);
-      color: var(--muted); font-size: 0.88rem; overflow-wrap: anywhere; }
+    footer {
+      margin-top: 2.5rem; padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted); font-size: 0.88rem; overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 860px) {
+      table.report, table.report > tbody, table.report > tbody > tr,
+      table.report > tbody > tr > td { display: block; width: 100%; }
+      table.report > thead { display: none; }
+      table.report { border: 0; }
+      table.report > tbody > tr {
+        border: 1px solid var(--border); border-radius: 0.5rem;
+        margin-bottom: 1rem; padding: 0.25rem 0.75rem; overflow: hidden;
+      }
+      table.report > tbody > tr:hover > td { background: none; }
+      table.report > tbody > tr > td {
+        border: 0; border-bottom: 1px solid var(--border);
+        padding: 0.55rem 0; overflow-wrap: anywhere;
+      }
+      table.report > tbody > tr > td:last-child { border-bottom: 0; }
+      table.report > tbody > tr > td::before {
+        content: attr(data-label);
+        display: block; font-size: 0.72rem; text-transform: uppercase;
+        letter-spacing: 0.04em; color: var(--muted); margin-bottom: 0.15rem;
+      }
+      table.inner { width: 100%; font-size: 0.78rem; }
+      table.inner th, table.inner td { white-space: normal; }
+    }
 """
 
 NAV_HTML = """
@@ -492,18 +611,88 @@ NAV_HTML = """
       <img class="light-only" src="https://blankonlinux.id/logo-black.png" alt="BlankOn" width="796" height="189">
       <img class="dark-only" src="https://blankonlinux.id/logo-white.png" alt="BlankOn" width="796" height="189">
     </a>
-    <nav class="nav-links">
+    <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
+    <nav class="nav-links" id="nav-links">
       <a href="https://blankonlinux.id/en/download">Download</a>
       <a href="https://blankonlinux.id/en/wiki/">Wiki</a>
-      <a href="https://irgsh.blankonlinux.id/">IRGSH</a>
-      <a href="https://packages.blankonlinux.id/">Packages</a>
-      <a href="https://security.blankonlinux.id/">Security</a>
-      <a href="https://arsip.blankonlinux.id/">Arsip</a>
-      <a href="https://arsip-dev.blankonlinux.id/">Arsip Dev</a>
-      <a href="https://github.com/blankon">Github</a>
+      <div class="nav-drop">
+        <button type="button" aria-expanded="false" aria-haspopup="menu">
+          Development
+          <svg class="nav-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <ul>
+          <li><a href="https://blankonlinux.id/en/team">Team</a></li>
+          <li><a href="https://irgsh.blankonlinux.id/">IRGSH</a></li>
+          <li><a href="https://packages.blankonlinux.id/">Packages</a></li>
+          <li><a href="https://security.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Security</a></li>
+          <li><a href="https://jahitan.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Jahitan<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+          <li><a href="https://arsip.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+          <li><a href="https://arsip-dev.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip Dev<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+          <li><a href="https://github.com/blankon" target="_blank" rel="noopener noreferrer">Github<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+        </ul>
+      </div>
+      <a href="https://blankon.id/en/sponsorship" target="_blank" rel="noopener noreferrer">Sponsorship<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a>
+      <a href="https://blankon.id/en/donate" target="_blank" rel="noopener noreferrer">Donate<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a>
     </nav>
   </div>
 </header>
+"""
+
+NAV_SCRIPT = """
+  (function () {
+    var toggle = document.querySelector('.nav-toggle');
+    var links = document.getElementById('nav-links');
+    toggle.addEventListener('click', function () {
+      var open = links.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+
+    // Hover opens the dropdown on pointer devices; touch devices tap it open.
+    var drop = document.querySelector('.nav-drop');
+    var dropBtn = drop.querySelector('button');
+    var canHover = function () { return window.matchMedia('(hover: hover)').matches; };
+    var closeTimer = null;
+
+    function setDrop(open) {
+      drop.classList.toggle('open', open);
+      dropBtn.setAttribute('aria-expanded', String(open));
+    }
+    // Closing is delayed so the cursor can wander off the menu and back
+    // without the panel vanishing under it.
+    drop.addEventListener('mouseenter', function () {
+      clearTimeout(closeTimer);
+      if (canHover()) setDrop(true);
+    });
+    drop.addEventListener('mouseleave', function () {
+      if (!canHover()) return;
+      clearTimeout(closeTimer);
+      closeTimer = setTimeout(function () { setDrop(false); }, 100);
+    });
+
+    dropBtn.addEventListener('click', function (event) {
+      event.stopPropagation();
+      clearTimeout(closeTimer);
+      setDrop(canHover() ? true : !drop.classList.contains('open'));
+    });
+    document.addEventListener('click', function (event) {
+      if (!drop.contains(event.target)) {
+        clearTimeout(closeTimer);
+        setDrop(false);
+      }
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        clearTimeout(closeTimer);
+        setDrop(false);
+        links.classList.remove('open');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
 """
 
 FILTER_SCRIPT = """<script>
@@ -636,6 +825,7 @@ def write_html_report(findings, html_dir, repo_url):
   </footer>
 </main>
 {FILTER_SCRIPT}
+<script>{NAV_SCRIPT}</script>
 </body>
 </html>
 """
