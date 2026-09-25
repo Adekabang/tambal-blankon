@@ -881,8 +881,9 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
     def e(s):
         return _html.escape(str(s))
 
-    def finding_date(f):
-        """Date for a finding: latest DSA date among its CVEs, else latest NVD published."""
+    def finding_date_info(f):
+        """Return (date_str, source) for a finding: latest DSA date ('dsa'),
+        else latest NVD published ('nvd'), or (None, None)."""
         if dsa_dates:
             dsas = []
             for c in f.get("cves", []):
@@ -890,9 +891,11 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
                 if d and dsa_dates.get(d):
                     dsas.append(dsa_dates[d])
             if dsas:
-                return max(dsas)
+                return max(dsas), "dsa"
         dates = [c.get("published") for c in f.get("cves", []) if c.get("published")]
-        return max(dates).split("T")[0] if dates else None
+        if dates:
+            return max(dates).split("T")[0], "nvd"
+        return None, None
 
     show_dsa = dsa_map is not None
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -926,8 +929,12 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
                 dsa_ids.append(d)
         dsa_attr = " ".join(dsa_ids)
 
-        # Advisory cell: DSA lines (if any) above the CVE list.
+        # Advisory cell: date context + DSA lines (if any) above the CVE list.
+        date_str, date_src = finding_date_info(f)
         adv_parts = []
+        if date_str:
+            label = "DSA date" if date_src == "dsa" else "CVE published"
+            adv_parts.append(f'{label}: {date_str}')
         if show_dsa and dsa_ids:
             for d in dsa_ids:
                 ann = (dsa_announce or {}).get(d)
@@ -940,13 +947,9 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
         # Details cell: fixed-in-stable-releases table + description.
         details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
 
-        date_str = finding_date(f)
-        date_cell = f'<td data-label="Date">{e(date_str) if date_str else "—"}</td>'
-
         rows.append(f"""
         <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
           <td>{e(f['package'])}</td>
-          {date_cell}
           {sev_cell}
           <td class="ver-our">{e(f['our_version'])}</td>
           <td class="ver-fix">{e(f['fixed_version'])}</td>
@@ -1063,7 +1066,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
   {"" if not count else f'''
   <table>
     <thead>
-      <tr><th>Package</th><th>Date</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
+      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
     </thead>
     <tbody>{''.join(rows)}</tbody>
   </table>'''}
