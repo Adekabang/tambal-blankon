@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -77,10 +78,56 @@ DSA_ANNOUNCE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "d
 _VERSION_CACHE = {}
 
 
+# Fetches that never succeeded, even after every retry. Collected here so the
+# generated report can say which data is missing instead of silently dropping it.
+FETCH_FAILURES = []
+
+
+def record_fetch_failure(url, error, attempts):
+    FETCH_FAILURES.append({
+        "url": url,
+        "error": error,
+        "attempts": attempts,
+        "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+    })
+
+
+def report_fetch_failures():
+    """Print a stderr summary of fetches that never succeeded."""
+    if not FETCH_FAILURES:
+        return
+    print(f"\n{len(FETCH_FAILURES)} fetch(es) failed after retries:", file=sys.stderr)
+    for fail in FETCH_FAILURES:
+        print(f"  - {fail['url']} ({fail['attempts']} attempt(s)): {fail['error']}",
+              file=sys.stderr)
+
+
 def _fetch_raw(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.read()
+    """Fetch URL bytes with retry logic for transient failures (503, timeouts)."""
+    max_retries = 3
+    retry_delay = 30
+
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 503 and attempt < max_retries - 1:
+                print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... "
+                      f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
+            record_fetch_failure(url, f"HTTP {e.code} {e.reason}", attempt + 1)
+            raise
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < max_retries - 1:
+                print(f"Connection error: {e}. Retrying in {retry_delay}s... "
+                      f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
+            record_fetch_failure(url, str(e), attempt + 1)
+            raise
 
 
 def fetch_bytes(url):
@@ -364,13 +411,15 @@ def _ensure_dsa_list(no_cache=False):
 
 
 def parse_dsa_list(text):
-    """Parse data/DSA/list into a {CVE: DSA-id} map (newest DSA wins)."""
+    """Parse data/DSA/list into {CVE: DSA-id} and {DSA-id: YYYY-MM-DD} maps."""
     dsa_map = {}
+    dsa_dates = {}
     current = None
     for line in text.splitlines():
-        m = re.match(r"\[.*?\]\s+(DSA-\d+-\d+)\s+", line)
+        m = re.match(r"\[(\d{2} \w{3} \d{4})\]\s+(DSA-\d+-\d+)\s+", line)
         if m:
-            current = m.group(1)
+            current = m.group(2)
+            dsa_dates[current] = _parse_dsa_date(m.group(1))
             continue
         if current:
             m2 = re.search(r"\{([^}]*)\}", line)
@@ -378,18 +427,27 @@ def parse_dsa_list(text):
                 for cve in m2.group(1).split():
                     if cve.startswith("CVE-"):
                         dsa_map.setdefault(cve, current)
-    return dsa_map
+    return dsa_map, dsa_dates
+
+
+def _parse_dsa_date(s):
+    """Parse a DSA list date like '24 Sep 2026' -> 'YYYY-MM-DD'."""
+    try:
+        return datetime.strptime(s, "%d %b %Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return s
 
 
 def load_dsa_map(no_cache=False):
+    """Return ({CVE: DSA-id}, {DSA-id: date}) from data/DSA/list."""
     path = _ensure_dsa_list(no_cache=no_cache)
     if not path:
         print("Warning: could not fetch the DSA list.", file=sys.stderr)
-        return {}
+        return {}, {}
     with open(path) as f:
-        dsa_map = parse_dsa_list(f.read())
+        dsa_map, dsa_dates = parse_dsa_list(f.read())
     print(f"Loaded {len(dsa_map)} CVE->DSA mappings.", file=sys.stderr)
-    return dsa_map
+    return dsa_map, dsa_dates
 
 
 def load_dsa_announce(no_cache=False):
@@ -817,11 +875,24 @@ FILTER_SCRIPT = """<script>
 """
 
 
-def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=None):
+def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=None, dsa_dates=None, failures=None):
     import html as _html
 
     def e(s):
         return _html.escape(str(s))
+
+    def finding_date(f):
+        """Date for a finding: latest DSA date among its CVEs, else latest NVD published."""
+        if dsa_dates:
+            dsas = []
+            for c in f.get("cves", []):
+                d = (dsa_map or {}).get(c["id"])
+                if d and dsa_dates.get(d):
+                    dsas.append(dsa_dates[d])
+            if dsas:
+                return max(dsas)
+        dates = [c.get("published") for c in f.get("cves", []) if c.get("published")]
+        return max(dates).split("T")[0] if dates else None
 
     show_dsa = dsa_map is not None
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -869,9 +940,13 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
         # Details cell: fixed-in-stable-releases table + description.
         details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
 
+        date_str = finding_date(f)
+        date_cell = f'<td data-label="Date">{e(date_str) if date_str else "—"}</td>'
+
         rows.append(f"""
         <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
           <td>{e(f['package'])}</td>
+          {date_cell}
           {sev_cell}
           <td class="ver-our">{e(f['our_version'])}</td>
           <td class="ver-fix">{e(f['fixed_version'])}</td>
@@ -920,6 +995,49 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
     {dsa_filter}
   </div>'''
 
+    # Fetches that never came back, so the reader knows the table above may be
+    # missing advisories or versions.
+    seen_failures = {}
+    for fail in failures or []:
+        key = (fail["url"], fail["error"])
+        if key in seen_failures:
+            seen_failures[key]["occurrences"] += 1
+        else:
+            seen_failures[key] = dict(fail, occurrences=1)
+
+    fail_rows = []
+    for fail in seen_failures.values():
+        tries = f'{fail["attempts"]} attempt(s)'
+        if fail["occurrences"] > 1:
+            tries += f' × {fail["occurrences"]} run(s)'
+        fail_rows.append(
+            f'<tr>'
+            f'<td data-label="Time">{e(fail["time"])}</td>'
+            f'<td class="url" data-label="URL">'
+            f'<a href="{e(fail["url"])}" target="_blank">{e(fail["url"])}</a></td>'
+            f'<td data-label="Tried">{e(tries)}</td>'
+            f'<td class="err" data-label="Error">{e(fail["error"])}</td>'
+            f'</tr>'
+        )
+
+    if fail_rows:
+        failures_html = f"""
+  <section class="failures">
+    <h2>Failed fetches ({len(fail_rows)})</h2>
+    <p class="note">These pages could not be retrieved, even after retrying,
+       so the report above may be incomplete.</p>
+    <table class="report">
+      <thead>
+        <tr><th>Time</th><th>URL</th><th>Tried</th><th>Error</th></tr>
+      </thead>
+      <tbody>
+        {''.join(fail_rows)}
+      </tbody>
+    </table>
+  </section>"""
+    else:
+        failures_html = ""
+
     page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -945,10 +1063,11 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
   {"" if not count else f'''
   <table>
     <thead>
-      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
+      <tr><th>Package</th><th>Date</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
     </thead>
     <tbody>{''.join(rows)}</tbody>
   </table>'''}
+  {failures_html}
   <footer>
     Source code: <a href="{e(SOURCE_URL)}" target="_blank">{e(SOURCE_URL)}</a>
   </footer>
@@ -1001,8 +1120,9 @@ def main():
     if no_dsa:
         dsa_map = None
         dsa_announce = None
+        dsa_dates = None
     else:
-        dsa_map = load_dsa_map(no_cache=no_cache)
+        dsa_map, dsa_dates = load_dsa_map(no_cache=no_cache)
         dsa_announce = load_dsa_announce(no_cache=no_cache)
 
     print("Evaluating packages ...", file=sys.stderr)
@@ -1029,7 +1149,8 @@ def main():
     if not findings:
         print("No vulnerable packages found.", file=sys.stderr)
         if html_dir:
-            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce)
+            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
+        report_fetch_failures()
         sys.exit(0)
 
     print(f"Found {len(findings)} package(s) behind Debian security fixes:\n", file=sys.stderr)
@@ -1037,7 +1158,9 @@ def main():
         print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce)
+        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
+
+    report_fetch_failures()
 
 
 if __name__ == "__main__":
